@@ -1,14 +1,31 @@
+use aws_sdk_cloudformation::{
+    error::{ProvideErrorMetadata, SdkError},
+    types::Parameter,
+};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
-use lambda_http::{run, service_fn, Body, Error, Request, Response, RequestExt};
-use serde_json::{Value, json};
-use tracing::{instrument, info, warn};
+use lambda_http::{run, service_fn, Body, Error, Request, Response};
+use serde_json::{json, Value};
+use tracing::{info, instrument, warn};
+
+#[derive(Debug)]
+enum ServerState {
+    Running,
+    Stopped,
+}
+
+impl ServerState {
+    fn as_template_value(&self) -> &str {
+        match self {
+            ServerState::Running => "Running",
+            ServerState::Stopped => "Stopped",
+        }
+    }
+}
 
 /// This is the main body for the function.
 /// Write your code inside it.
 /// There are some code example in the following URLs:
 /// - https://github.com/awslabs/aws-lambda-rust-runtime/tree/main/examples
-/// 
-// #[instrument(skip(request), fields(req_id = %request.lambda_context().request_id))]
 async fn function_handler(request: Request) -> Result<Response<Body>, Error> {
     // Extract some useful information from the request
     info!("recieved request");
@@ -46,24 +63,136 @@ async fn function_handler(request: Request) -> Result<Response<Body>, Error> {
         return Ok(resp);
     }
 
-    let message = json!({
-        "type": 4,
-        "data": {
-            "tts": false,
-            "content": "Congrats on sending your command!",
-            "embeds": [],
-            "allowed_mentions": { "parse": [] }
-        }
-    }).to_string();
+    let response = match parsed_body["data"]["options"][0]["name"]
+        .as_str()
+        .expect("missing command")
+    {
+        "start" => start_server().await,
+        "stop" => stop_server().await,
+        _ => panic!("Unknown command"),
+    }?;
 
     // Return something that implements IntoResponse.
     // It will be serialized to the right response event automatically by the runtime
     let resp = Response::builder()
         .status(200)
         .header("content-type", "application/json")
-        .body(message.into())
+        .body(response.to_string().into())
         .map_err(Box::new)?;
     Ok(resp)
+}
+
+async fn start_server() -> Result<Value, Error> {
+    let res = update_server(ServerState::Running).await?;
+
+    let content = match res {
+        UpdateResponse::Success => "Starting the server!",
+        UpdateResponse::HandledError(msg) => msg,
+    };
+
+    Ok(json!({
+        "type": 4,
+        "data": {
+            "tts": false,
+            "content": content,
+            "embeds": [],
+            "allowed_mentions": { "parse": [] }
+        }
+    }))
+}
+
+async fn stop_server() -> Result<Value, Error> {
+    let res = update_server(ServerState::Stopped).await?;
+
+    let content = match res {
+        UpdateResponse::Success => "Stopping the server!",
+        UpdateResponse::HandledError(msg) => msg,
+    };
+
+    Ok(json!({
+        "type": 4,
+        "data": {
+            "tts": false,
+            "content": content,
+            "embeds": [],
+            "allowed_mentions": { "parse": [] }
+        }
+    }))
+}
+
+enum UpdateResponse<'a> {
+    Success,
+    HandledError(&'a str),
+}
+
+#[instrument]
+async fn update_server(desired_state: ServerState) -> Result<UpdateResponse<'static>, Error> {
+    info!("attempting to update server");
+    let config = aws_config::load_from_env().await;
+    let client = aws_sdk_cloudformation::Client::new(&config);
+
+    let unchanged_params: Vec<Parameter> = [
+        "ECSAMI",
+        "EnableRcon",
+        "FactorioImageTag",
+        "HostedZoneId",
+        "InstanceType",
+        "KeyPairName",
+        "RecordName",
+        "SpotPrice",
+        "UpdateModsOnStart",
+        "YourIp",
+    ]
+    .iter()
+    .map(|name| {
+        Parameter::builder()
+            .set_parameter_key(Some(name.to_string()))
+            .set_use_previous_value(Some(true))
+            .build()
+    })
+    .collect();
+
+    info!("updating server");
+    let res = client
+        .update_stack()
+        .stack_name("factorio-ecs-spot")
+        .use_previous_template(true)
+        .capabilities(aws_sdk_cloudformation::types::Capability::CapabilityIam)
+        .set_parameters(Some(unchanged_params))
+        .parameters(
+            Parameter::builder()
+                .set_parameter_key(Some("ServerState".to_string()))
+                .set_parameter_value(Some(desired_state.as_template_value().to_string()))
+                .build(),
+        )
+        .send()
+        .await
+        .map(|_| UpdateResponse::Success)
+        .unwrap_or_else(|sdk_error| {
+            tracing::error!(?sdk_error, "UpdateStackError");
+
+            if let SdkError::ServiceError(response_error) = sdk_error {
+                let response_error = response_error.into_err();
+                if ProvideErrorMetadata::code(&response_error) == Some("ValidationError") {
+                    let message = response_error.message().unwrap();
+                    info!(message, "UpdateStack ValidationError");
+                    if message == "No updates are to be performed." {
+                        return UpdateResponse::HandledError(
+                            "Server is already in the desired state.",
+                        );
+                    } else if message
+                        .contains("is in UPDATE_IN_PROGRESS state and can not be updated")
+                    {
+                        return UpdateResponse::HandledError("Server is currently being updated");
+                    }
+                }
+                panic!("Unhandled UpdateStackError {:?}", response_error);
+            } else {
+                panic!("Unhandled SDK error: {:?}", sdk_error)
+            }
+        });
+
+    Ok(res)
 }
 
 fn verify(event: &Request) -> Result<(), Error> {
@@ -83,7 +212,6 @@ fn verify(event: &Request) -> Result<(), Error> {
     };
 
     Ok(get_verifying_key().verify(format!("{}{}", timestamp, body).as_bytes(), &sig)?)
-        
 }
 
 fn get_verifying_key() -> VerifyingKey {
@@ -99,7 +227,8 @@ fn get_verifying_key() -> VerifyingKey {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    tracing_subscriber::fmt().json()
+    tracing_subscriber::fmt()
+        .json()
         .with_max_level(tracing::Level::INFO)
         .with_current_span(false)
         // disable printing the name of the module in every log line.
