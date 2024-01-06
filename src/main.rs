@@ -26,7 +26,11 @@ impl ServerState {
 /// Write your code inside it.
 /// There are some code example in the following URLs:
 /// - https://github.com/awslabs/aws-lambda-rust-runtime/tree/main/examples
-async fn function_handler(request: Request) -> Result<Response<Body>, Error> {
+async fn function_handler(
+    server_accessor: &ServerAccessor,
+    cfn_accessor: &CfnAccessor,
+    request: Request,
+) -> Result<Response<Body>, Error> {
     // Extract some useful information from the request
     info!("recieved request");
 
@@ -67,8 +71,9 @@ async fn function_handler(request: Request) -> Result<Response<Body>, Error> {
         .as_str()
         .expect("missing command")
     {
-        "start" => start_server().await,
-        "stop" => stop_server().await,
+        "start" => cfn_accessor.start_server().await,
+        "stop" => cfn_accessor.stop_server().await,
+        "ip" => server_accessor.get_server_ip().await,
         _ => panic!("Unknown command"),
     }?;
 
@@ -82,42 +87,9 @@ async fn function_handler(request: Request) -> Result<Response<Body>, Error> {
     Ok(resp)
 }
 
-async fn start_server() -> Result<Value, Error> {
-    let res = update_server(ServerState::Running).await?;
-
-    let content = match res {
-        UpdateResponse::Success => "Starting the server!",
-        UpdateResponse::HandledError(msg) => msg,
-    };
-
-    Ok(json!({
-        "type": 4,
-        "data": {
-            "tts": false,
-            "content": content,
-            "embeds": [],
-            "allowed_mentions": { "parse": [] }
-        }
-    }))
-}
-
-async fn stop_server() -> Result<Value, Error> {
-    let res = update_server(ServerState::Stopped).await?;
-
-    let content = match res {
-        UpdateResponse::Success => "Stopping the server!",
-        UpdateResponse::HandledError(msg) => msg,
-    };
-
-    Ok(json!({
-        "type": 4,
-        "data": {
-            "tts": false,
-            "content": content,
-            "embeds": [],
-            "allowed_mentions": { "parse": [] }
-        }
-    }))
+#[derive(Debug)]
+struct CfnAccessor {
+    client: aws_sdk_cloudformation::Client,
 }
 
 enum UpdateResponse<'a> {
@@ -125,74 +97,223 @@ enum UpdateResponse<'a> {
     HandledError(&'a str),
 }
 
-#[instrument]
-async fn update_server(desired_state: ServerState) -> Result<UpdateResponse<'static>, Error> {
-    info!("attempting to update server");
-    let config = aws_config::load_from_env().await;
-    let client = aws_sdk_cloudformation::Client::new(&config);
+impl CfnAccessor {
+    pub fn new(config: &aws_config::SdkConfig) -> Self {
+        CfnAccessor {
+            client: aws_sdk_cloudformation::Client::new(config),
+        }
+    }
 
-    let unchanged_params: Vec<Parameter> = [
-        "ECSAMI",
-        "EnableRcon",
-        "FactorioImageTag",
-        "HostedZoneId",
-        "InstanceType",
-        "KeyPairName",
-        "RecordName",
-        "SpotPrice",
-        "UpdateModsOnStart",
-        "YourIp",
-    ]
-    .iter()
-    .map(|name| {
-        Parameter::builder()
-            .set_parameter_key(Some(name.to_string()))
-            .set_use_previous_value(Some(true))
-            .build()
-    })
-    .collect();
+    pub async fn start_server(&self) -> Result<Value, Error> {
+        let res = self.update_server(ServerState::Running).await?;
 
-    info!("updating server");
-    let res = client
-        .update_stack()
-        .stack_name("factorio-ecs-spot")
-        .use_previous_template(true)
-        .capabilities(aws_sdk_cloudformation::types::Capability::CapabilityIam)
-        .set_parameters(Some(unchanged_params))
-        .parameters(
+        let content = match res {
+            UpdateResponse::Success => "Starting the server!",
+            UpdateResponse::HandledError(msg) => msg,
+        };
+
+        Ok(json!({
+            "type": 4,
+            "data": {
+                "tts": false,
+                "content": content,
+                "embeds": [],
+                "allowed_mentions": { "parse": [] }
+            }
+        }))
+    }
+
+    pub async fn stop_server(&self) -> Result<Value, Error> {
+        let res = self.update_server(ServerState::Stopped).await?;
+
+        let content = match res {
+            UpdateResponse::Success => "Stopping the server!",
+            UpdateResponse::HandledError(msg) => msg,
+        };
+
+        Ok(json!({
+            "type": 4,
+            "data": {
+                "tts": false,
+                "content": content,
+                "embeds": [],
+                "allowed_mentions": { "parse": [] }
+            }
+        }))
+    }
+
+    #[instrument]
+    async fn update_server(
+        &self,
+        desired_state: ServerState,
+    ) -> Result<UpdateResponse<'static>, Error> {
+        info!("attempting to update server");
+
+        let unchanged_params: Vec<Parameter> = [
+            "ECSAMI",
+            "EnableRcon",
+            "FactorioImageTag",
+            "HostedZoneId",
+            "InstanceType",
+            "KeyPairName",
+            "RecordName",
+            "SpotPrice",
+            "UpdateModsOnStart",
+            "YourIp",
+        ]
+        .iter()
+        .map(|name| {
             Parameter::builder()
-                .set_parameter_key(Some("ServerState".to_string()))
-                .set_parameter_value(Some(desired_state.as_template_value().to_string()))
-                .build(),
-        )
-        .send()
-        .await
-        .map(|_| UpdateResponse::Success)
-        .unwrap_or_else(|sdk_error| {
-            tracing::error!(?sdk_error, "UpdateStackError");
+                .set_parameter_key(Some(name.to_string()))
+                .set_use_previous_value(Some(true))
+                .build()
+        })
+        .collect();
 
-            if let SdkError::ServiceError(response_error) = sdk_error {
-                let response_error = response_error.into_err();
-                if ProvideErrorMetadata::code(&response_error) == Some("ValidationError") {
-                    let message = response_error.message().unwrap();
-                    info!(message, "UpdateStack ValidationError");
-                    if message == "No updates are to be performed." {
-                        return UpdateResponse::HandledError(
-                            "Server is already in the desired state.",
-                        );
-                    } else if message
-                        .contains("is in UPDATE_IN_PROGRESS state and can not be updated")
-                    {
-                        return UpdateResponse::HandledError("Server is currently being updated");
+        info!("updating server");
+        let res = self
+            .client
+            .update_stack()
+            .stack_name("factorio-ecs-spot")
+            .use_previous_template(true)
+            .capabilities(aws_sdk_cloudformation::types::Capability::CapabilityIam)
+            .set_parameters(Some(unchanged_params))
+            .parameters(
+                Parameter::builder()
+                    .set_parameter_key(Some("ServerState".to_string()))
+                    .set_parameter_value(Some(desired_state.as_template_value().to_string()))
+                    .build(),
+            )
+            .send()
+            .await
+            .map(|_| UpdateResponse::Success)
+            .unwrap_or_else(|sdk_error| {
+                tracing::error!(?sdk_error, "UpdateStackError");
+
+                if let SdkError::ServiceError(response_error) = sdk_error {
+                    let response_error = response_error.into_err();
+                    if ProvideErrorMetadata::code(&response_error) == Some("ValidationError") {
+                        let message = response_error.message().unwrap();
+                        info!(message, "UpdateStack ValidationError");
+                        if message == "No updates are to be performed." {
+                            return UpdateResponse::HandledError(
+                                "Server is already in the desired state.",
+                            );
+                        } else if message
+                            .contains("is in UPDATE_IN_PROGRESS state and can not be updated")
+                        {
+                            return UpdateResponse::HandledError(
+                                "Server is currently being updated",
+                            );
+                        }
+                    }
+                    panic!("Unhandled UpdateStackError {:?}", response_error);
+                } else {
+                    panic!("Unhandled SDK error: {:?}", sdk_error)
+                }
+            });
+
+        Ok(res)
+    }
+}
+
+struct ServerAccessor {
+    asg_client: aws_sdk_autoscaling::Client,
+    ec2_client: aws_sdk_ec2::Client,
+    ecs_client: aws_sdk_ecs::Client,
+}
+
+impl ServerAccessor {
+    pub fn new(config: &aws_config::SdkConfig) -> Self {
+        ServerAccessor {
+            asg_client: aws_sdk_autoscaling::Client::new(&config),
+            ec2_client: aws_sdk_ec2::Client::new(&config),
+            ecs_client: aws_sdk_ecs::Client::new(config),
+        }
+    }
+
+    pub async fn get_server_ip(&self) -> Result<Value, Error> {
+        let _asg_response = self
+            .asg_client
+            .describe_auto_scaling_groups()
+            .auto_scaling_group_names("factorio-ecs-spot-asg")
+            .send()
+            .await?;
+        let asg_instance = _asg_response
+            .auto_scaling_groups()
+            .get(0)
+            .and_then(|asg| asg.instances().get(0));
+
+        let content = if let Some(asg_instance) = asg_instance {
+            match asg_instance.lifecycle_state().unwrap() {
+                aws_sdk_autoscaling::types::LifecycleState::InService => {
+                    info!("ASG instance is InService");
+                    let ip_future = self.get_instance_ip(asg_instance.instance_id().unwrap());
+                    let is_ecs_running_future = self.is_ecs_running();
+
+                    let ip = ip_future.await?;
+                    if is_ecs_running_future.await? {
+                        format!("Server is up and running at IP: `{}`!", ip)
+                    } else {
+                        format!(
+                            "Server IP will be: `{}`. However, factorio has not started running yet.",
+                            ip
+                        )
                     }
                 }
-                panic!("Unhandled UpdateStackError {:?}", response_error);
-            } else {
-                panic!("Unhandled SDK error: {:?}", sdk_error)
+                _not_running_state => {
+                    format!("Server instance is in the {:#?} state", _not_running_state)
+                }
             }
-        });
+        } else {
+            "No server is running.".to_string()
+        };
 
-    Ok(res)
+        Ok(json!({
+                "type": 4,
+                "data": {
+                    "tts": false,
+                    "content": content,
+                    "embeds": [],
+                    "allowed_mentions": { "parse": [] }
+                }
+        }))
+    }
+
+    async fn get_instance_ip(&self, instance_id: &str) -> Result<String, Error> {
+        let response = self
+            .ec2_client
+            .describe_instances()
+            .instance_ids(instance_id)
+            .send()
+            .await?;
+
+        let ip_address = response
+            .reservations()
+            .get(0)
+            .and_then(|res| res.instances().get(0))
+            .and_then(|instance| instance.public_ip_address());
+
+        Ok(ip_address.expect("No IP address found").to_string())
+    }
+
+    async fn is_ecs_running(&self) -> Result<bool, Error> {
+        let response = self
+            .ecs_client
+            .describe_services()
+            .cluster("factorio-ecs-spot-cluster")
+            .services("factorio-ecs-spot-ecs-service")
+            .send()
+            .await?;
+
+        let running_tasks = response
+            .services()
+            .get(0)
+            .and_then(|service| service.deployments().get(0))
+            .map(|deployment| deployment.running_count);
+
+        Ok(running_tasks.expect("Deployment was not found") > 0)
+    }
 }
 
 fn verify(event: &Request) -> Result<(), Error> {
@@ -237,5 +358,11 @@ async fn main() -> Result<(), Error> {
         .without_time()
         .init();
 
-    run(service_fn(function_handler)).await
+    let service_accessor = ServerAccessor::new(&aws_config::load_from_env().await);
+    let cfn_accessor = CfnAccessor::new(&aws_config::load_from_env().await);
+
+    run(service_fn(|event: Request| async {
+        function_handler(&service_accessor, &cfn_accessor, event).await
+    }))
+    .await
 }
