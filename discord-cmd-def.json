@@ -1,0 +1,21 @@
+{
+  "name": "factorio",
+  "description": "Control factorio",
+  "options": [
+    {
+      "type": 1,
+      "name": "start",
+      "description": "Starts the server"
+    },
+    {
+      "type": 1,
+      "name": "stop",
+      "description": "Stops the server"
+    },
+    {
+      "type": 1,
+      "name": "ip",
+      "description": "Gets the IP of the server"
+    }
+  ]
+}
