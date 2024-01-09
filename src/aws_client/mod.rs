@@ -3,6 +3,7 @@ use serde_json::Value;
 
 pub mod cfn;
 pub mod compute;
+pub mod ddb;
 
 pub trait ServerUpdater {
     async fn start_server(&self) -> Result<Value>;

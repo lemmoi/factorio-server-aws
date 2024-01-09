@@ -12,7 +12,6 @@ impl DiscordAuthenticator {
             public_key: get_verifying_key(),
         }
     }
-    
 }
 
 impl Default for DiscordAuthenticator {

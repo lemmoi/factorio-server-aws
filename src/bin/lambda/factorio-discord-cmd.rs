@@ -1,8 +1,12 @@
-use factorio_server_lambda::aws_client::{
-    cfn::CfnAccessor, compute::ServerAccessor, ServerInfo, ServerUpdater,
+use factorio_server_lambda::{
+    aws_client::{
+        cfn::CfnAccessor, compute::ServerAccessor, ddb::DynamoDBAccessor, ServerInfo, ServerUpdater,
+    },
+    model::domain::StartServerInteraction,
 };
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use serde_json::Value;
+use time::OffsetDateTime;
 use tracing::{info, warn};
 
 use factorio_server_lambda::discord::{
@@ -17,6 +21,7 @@ async fn function_handler(
     discord_auth: &DiscordAuthenticator,
     server_accessor: &ServerAccessor,
     cfn_accessor: &CfnAccessor,
+    ddb: &DynamoDBAccessor,
     request: Request,
 ) -> Result<Response<Body>, Error> {
     // Extract some useful information from the request
@@ -61,15 +66,27 @@ async fn function_handler(
         return Ok(resp);
     }
 
+    let interaction = StartServerInteraction {
+        token: parsed_body["token"]
+            .as_str()
+            .expect("Missing interaction token")
+            .to_string(),
+        timestamp: OffsetDateTime::now_utc(),
+    };
+
     let response = match parsed_body["data"]["options"][0]["name"]
         .as_str()
         .expect("missing command")
     {
-        "start" => cfn_accessor.start_server().await,
-        "stop" => cfn_accessor.stop_server().await,
-        "ip" => server_accessor.get_server_ip().await,
+        "start" => {
+            let response = cfn_accessor.start_server().await?;
+            ddb.save_interaction(interaction).await?;
+            response
+        }
+        "stop" => cfn_accessor.stop_server().await?,
+        "ip" => server_accessor.get_server_ip().await?,
         _ => panic!("Unknown command"),
-    }?;
+    };
 
     // Return something that implements IntoResponse.
     // It will be serialized to the right response event automatically by the runtime
@@ -98,9 +115,10 @@ async fn main() -> Result<(), Error> {
     let aws_config = aws_config::load_from_env().await;
     let service_accessor = ServerAccessor::new(&aws_config);
     let cfn_accessor = CfnAccessor::new(&aws_config);
+    let ddb = DynamoDBAccessor::new(&aws_config);
 
     run(service_fn(|event: Request| async {
-        function_handler(&discord_auth, &service_accessor, &cfn_accessor, event).await
+        function_handler(&discord_auth, &service_accessor, &cfn_accessor, &ddb, event).await
     }))
     .await
 }
