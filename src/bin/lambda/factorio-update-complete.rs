@@ -1,6 +1,8 @@
 use anyhow::Result;
 use aws_lambda_events::event::cloudwatch_events::CloudWatchEvent;
-use factorio_server_lambda::aws_client::ddb::DynamoDBAccessor;
+use factorio_server_lambda::aws_client::{
+    compute::ServerAccessor, ddb::DynamoDBAccessor, ServerInfo,
+};
 use lambda_runtime::{run, service_fn, Error, LambdaEvent};
 use serde_json::json;
 use time::OffsetDateTime;
@@ -13,6 +15,7 @@ use tracing::info;
 /// - https://github.com/aws-samples/serverless-rust-demo/
 async fn function_handler(
     ddb: &DynamoDBAccessor,
+    service_accessor: &ServerAccessor,
     event: LambdaEvent<CloudWatchEvent>,
 ) -> Result<(), Error> {
     info!(?event.payload, "Received event");
@@ -22,19 +25,28 @@ async fn function_handler(
         .expect("No stack status was provided");
 
     match stack_status {
-        "UPDATE_COMPLETE" => Ok(handle_stack_update(ddb).await?),
+        "UPDATE_COMPLETE" => Ok(handle_stack_update(ddb, service_accessor).await?),
         _ => Ok(()),
     }
 }
 
 const APP_ID: &str = "1192583719236665424";
 
-async fn handle_stack_update(ddb: &DynamoDBAccessor) -> Result<()> {
+async fn handle_stack_update(
+    ddb: &DynamoDBAccessor,
+    service_accessor: &ServerAccessor,
+) -> Result<()> {
     let retrieved = ddb.get_latest_start().await?;
     if retrieved.is_none() {
         info!("No token was retrieved for this event.");
         return Ok(());
     }
+
+    let ip = service_accessor
+        .get_running_server_ip()
+        .await?
+        .expect("Update was complete but no instance was running!");
+
     let retrieved = retrieved.unwrap();
     let time_gap = OffsetDateTime::now_utc() - retrieved.timestamp;
 
@@ -48,13 +60,15 @@ async fn handle_stack_update(ddb: &DynamoDBAccessor) -> Result<()> {
     reqwest::Client::new()
         .patch(url)
         .body(json!({
-                "content": format!("Server has now been started and factorio is running. Start up took: {} minutes", time_gap.whole_minutes())
+                "content": format!("Server is started and factorio is running at `{}`. Start up took: {:.2} minutes.",
+                     ip, time_gap.as_seconds_f32() / 60.0)
             }
         ).to_string())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .send()
         .await?;
 
+    ddb.delete_interaction(retrieved).await?;
     Ok(())
 }
 
@@ -70,9 +84,11 @@ async fn main() -> Result<(), Error> {
         .without_time()
         .init();
 
-    let ddb = DynamoDBAccessor::new(&aws_config::load_from_env().await);
+    let aws_config = aws_config::load_from_env().await;
+    let ddb = DynamoDBAccessor::new(&aws_config);
+    let service_accessor = ServerAccessor::new(&aws_config);
     run(service_fn(|event: LambdaEvent<CloudWatchEvent>| async {
-        function_handler(&ddb, event).await
+        function_handler(&ddb, &service_accessor, event).await
     }))
     .await
 }

@@ -125,7 +125,9 @@ impl ServerUpdater for CfnAccessor {
         let res = self.update_server(ServerState::Running).await?;
 
         let content = match res {
-            UpdateResponse::Success => "Starting the server!",
+            UpdateResponse::Success => {
+                "Starting the server! This message will update when the server is ready to join."
+            }
             UpdateResponse::HandledError(msg) => msg,
         };
 

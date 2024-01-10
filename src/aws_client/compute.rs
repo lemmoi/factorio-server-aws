@@ -1,4 +1,5 @@
 use anyhow::Result;
+use aws_sdk_autoscaling::types::Instance;
 use serde_json::{json, Value};
 use tracing::info;
 
@@ -55,20 +56,26 @@ impl ServerAccessor {
 
         Ok(running_tasks.expect("Deployment was not found") > 0)
     }
-}
 
-impl ServerInfo for ServerAccessor {
-    async fn get_server_ip(&self) -> Result<Value> {
+    async fn get_asg_instance(&self) -> Result<Option<Instance>> {
         let _asg_response = self
             .asg_client
             .describe_auto_scaling_groups()
             .auto_scaling_group_names("factorio-ecs-spot-asg")
             .send()
             .await?;
-        let asg_instance = _asg_response
+
+        Ok(_asg_response
             .auto_scaling_groups()
             .first()
-            .and_then(|asg| asg.instances().first());
+            .and_then(|asg| asg.instances().first())
+            .map(|inst| inst.to_owned()))
+    }
+}
+
+impl ServerInfo for ServerAccessor {
+    async fn get_server_ip_response(&self) -> Result<Value> {
+        let asg_instance = self.get_asg_instance().await?;
 
         let content = if let Some(asg_instance) = asg_instance {
             match asg_instance.lifecycle_state().unwrap() {
@@ -104,5 +111,21 @@ impl ServerInfo for ServerAccessor {
                     "allowed_mentions": { "parse": [] }
                 }
         }))
+    }
+
+    async fn get_running_server_ip(&self) -> Result<Option<String>> {
+        let asg_instance = self.get_asg_instance().await?;
+
+        if let Some(asg_instance) = asg_instance {
+            Ok(match asg_instance.lifecycle_state().unwrap() {
+                aws_sdk_autoscaling::types::LifecycleState::InService => Some(
+                    self.get_instance_ip(asg_instance.instance_id().unwrap())
+                        .await?,
+                ),
+                _ => None,
+            })
+        } else {
+            Ok(None)
+        }
     }
 }

@@ -13,8 +13,8 @@ pub enum Command {
 
 #[derive(Serialize, Deserialize)]
 pub struct DiscordInteraction {
-    command: Command,
-    timestamp: i64,
+    pub command: Command,
+    pub timestamp: i64,
     token: String,
     ttl: i64,
 }

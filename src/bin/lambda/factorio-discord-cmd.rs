@@ -84,7 +84,7 @@ async fn function_handler(
             response
         }
         "stop" => cfn_accessor.stop_server().await?,
-        "ip" => server_accessor.get_server_ip().await?,
+        "ip" => server_accessor.get_server_ip_response().await?,
         _ => panic!("Unknown command"),
     };
 

@@ -11,5 +11,6 @@ pub trait ServerUpdater {
 }
 
 pub trait ServerInfo {
-    async fn get_server_ip(&self) -> Result<Value>;
+    async fn get_server_ip_response(&self) -> Result<Value>;
+    async fn get_running_server_ip(&self) -> Result<Option<String>>;
 }

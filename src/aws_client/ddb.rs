@@ -31,6 +31,19 @@ impl DynamoDBAccessor {
         Ok(())
     }
 
+    pub async fn delete_interaction<T: Into<DiscordInteraction>>(&self, item: T) -> Result<()> {
+        let item: DiscordInteraction = item.into();
+
+        self.client
+            .delete_item()
+            .table_name("discord-interaction-tokens")
+            .key("command", to_attribute_value(&item.command)?)
+            .key("timestamp", to_attribute_value(&item.timestamp)?)
+            .send()
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_latest_start(&self) -> Result<Option<StartServerInteraction>> {
         let response = self
             .client
