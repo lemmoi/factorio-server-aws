@@ -59,9 +59,29 @@ async fn handle_stack_update(
 
     reqwest::Client::new()
         .patch(url)
-        .body(json!({
-                "content": format!("Server is started and factorio is running at `{}`. Start up took: {:.2} minutes.",
-                     ip, time_gap.as_seconds_f32() / 60.0)
+        .body(json!(
+            {
+                "content": "",
+                "embeds": [
+                    {
+                      "type": "rich",
+                      "title": "Starting the server!",
+                      "description": format!("Factorio has successfully launched in {}m {}s.", time_gap.whole_minutes(), time_gap.whole_seconds() % 60),
+                      "color": 0x1de302,
+                      "fields": [
+                        {
+                          "name": "Server IP",
+                          "value": format!("`{}`", ip),
+                          "inline": true
+                        }
+                      ],
+                      "thumbnail": {
+                        "url": "https://factorio.com/static/img/factorio-wheel.png",
+                        "height": 0,
+                        "width": 0
+                      }
+                    }
+                  ],
             }
         ).to_string())
         .header(reqwest::header::CONTENT_TYPE, "application/json")

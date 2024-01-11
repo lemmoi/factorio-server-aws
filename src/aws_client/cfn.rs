@@ -124,19 +124,31 @@ impl ServerUpdater for CfnAccessor {
     async fn start_server(&self) -> Result<Value> {
         let res = self.update_server(ServerState::Running).await?;
 
-        let content = match res {
+         let (title, description) =match res {
             UpdateResponse::Success => {
-                "Starting the server! This message will update when the server is ready to join."
+                ("Starting the server!", Some("This message will update when the server is ready to join."))
             }
-            UpdateResponse::HandledError(msg) => msg,
+            UpdateResponse::HandledError(msg) => (msg, None),
         };
 
         Ok(json!({
             "type": 4,
             "data": {
                 "tts": false,
-                "content": content,
-                "embeds": [],
+                "content": "",
+                "embeds": [
+                    {
+                      "type": "rich",
+                      "title": title,
+                      "description": description,
+                      "color": 0x00FFFF,
+                      "thumbnail": {
+                        "url": "https://factorio.com/static/img/factorio-wheel.png",
+                        "height": 0,
+                        "width": 0
+                      }
+                    }
+                  ],
                 "allowed_mentions": { "parse": [] }
             }
         }))
@@ -145,7 +157,7 @@ impl ServerUpdater for CfnAccessor {
     async fn stop_server(&self) -> Result<Value> {
         let res = self.update_server(ServerState::Stopped).await?;
 
-        let content = match res {
+        let title = match res {
             UpdateResponse::Success => "Stopping the server!",
             UpdateResponse::HandledError(msg) => msg,
         };
@@ -154,8 +166,19 @@ impl ServerUpdater for CfnAccessor {
             "type": 4,
             "data": {
                 "tts": false,
-                "content": content,
-                "embeds": [],
+                "content": "",
+                "embeds": [
+                    {
+                      "type": "rich",
+                      "title": title,
+                      "color": 0x930707,
+                      "thumbnail": {
+                        "url": "https://factorio.com/static/img/factorio-wheel.png",
+                        "height": 0,
+                        "width": 0
+                      }
+                    }
+                  ],
                 "allowed_mentions": { "parse": [] }
             }
         }))
