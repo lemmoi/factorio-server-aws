@@ -79,7 +79,10 @@ async fn function_handler(
         .expect("missing command")
     {
         "start" => {
-            let response = cfn_accessor.start_server().await?;
+            let mount_dir = parsed_body["data"]["options"][0]["options"][0]["value"]
+                .as_str()
+                .expect("missing mount dir");
+            let response = cfn_accessor.start_server(mount_dir).await?;
             ddb.save_interaction(interaction).await?;
             response
         }

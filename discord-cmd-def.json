@@ -5,7 +5,25 @@
     {
       "type": 1,
       "name": "start",
-      "description": "Starts the server"
+      "description": "Starts the server",
+      "options": [
+        {
+          "type": 3,
+          "name": "save",
+          "description": "What save to load",
+          "choices": [
+            {
+              "name": "vanilla",
+              "value": "vanilla"
+            },
+            {
+              "name": "krastorio",
+              "value": "krastorio"
+            }
+          ],
+          "required": true
+        }
+      ]
     },
     {
       "type": 1,
@@ -19,3 +37,4 @@
     }
   ]
 }
+

@@ -16,14 +16,14 @@ pub struct CfnAccessor {
 
 #[derive(Debug)]
 enum ServerState {
-    Running,
+    Running(String),
     Stopped,
 }
 
 impl ServerState {
     fn as_template_value(&self) -> &str {
         match self {
-            ServerState::Running => "Running",
+            ServerState::Running(_) => "Running",
             ServerState::Stopped => "Stopped",
         }
     }
@@ -74,7 +74,7 @@ impl CfnAccessor {
             .collect();
 
         info!("updating server");
-        let res = self
+        let mut builder = self
             .client
             .update_stack()
             .stack_name("factorio-ecs-spot")
@@ -86,7 +86,18 @@ impl CfnAccessor {
                     .set_parameter_key(Some("ServerState".to_string()))
                     .set_parameter_value(Some(desired_state.as_template_value().to_string()))
                     .build(),
+            );
+
+        if let ServerState::Running(mount_dir) = desired_state {
+            builder = builder.parameters(
+                Parameter::builder()
+                    .set_parameter_key(Some("MountingDir".to_string()))
+                    .set_parameter_value(Some(format!("/{}/", mount_dir)))
+                    .build(),
             )
+        }
+
+        let res = builder
             .send()
             .await
             .map(|_| UpdateResponse::Success)
@@ -121,12 +132,14 @@ impl CfnAccessor {
 }
 
 impl ServerUpdater for CfnAccessor {
-    async fn start_server(&self) -> Result<Value> {
-        let res = self.update_server(ServerState::Running).await?;
+    async fn start_server(&self, mount_dir: &str) -> Result<Value> {
+        let res = self
+            .update_server(ServerState::Running(mount_dir.to_string()))
+            .await?;
 
          let (title, description) =match res {
             UpdateResponse::Success => {
-                ("Starting the server!", Some("This message will update when the server is ready to join."))
+                ("Starting the server!", Some(format!("Using the `{}` save. This message will update when the server is ready to join.", mount_dir)))
             }
             UpdateResponse::HandledError(msg) => (msg, None),
         };

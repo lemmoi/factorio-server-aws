@@ -6,7 +6,7 @@ pub mod compute;
 pub mod ddb;
 
 pub trait ServerUpdater {
-    async fn start_server(&self) -> Result<Value>;
+    async fn start_server(&self, mount_dir: &str) -> Result<Value>;
     async fn stop_server(&self) -> Result<Value>;
 }
 
